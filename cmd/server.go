@@ -44,6 +44,12 @@ var serverCmd = &cobra.Command{
 	},
 }
 
+// PortPool 管理可用端口范围
+// 字段说明:
+// mu - 保证并发安全的互斥锁
+// ports - 端口可用状态映射表（true=可用）
+// minPort - 端口池起始端口
+// maxPort - 端口池结束端口
 type PortPool struct {
 	mu      sync.Mutex
 	ports   map[int]bool
@@ -96,9 +102,12 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 		return
 	}
 
-	logger.Info("分配隧道端口",
-		zap.String("client", conn.RemoteAddr().String()),
-		zap.Int("port", port))
+	logger.Info("端口分配完成",
+		zap.String("client_ip", conn.RemoteAddr().String()),
+		zap.Int("allocated_port", port),
+		zap.Int("available_ports", len(portPool.ports)),
+		zap.Int("min_port", portPool.minPort),
+		zap.Int("max_port", portPool.maxPort))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

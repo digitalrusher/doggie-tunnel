@@ -58,17 +58,38 @@ var clientCmd = &cobra.Command{
 }
 
 // 新增心跳检测函数
+// heartbeat 连接心跳维护机制
+// 参数:
+//   ctx - 上下文控制
+//   conn - 目标连接
+//   interval - 心跳间隔时间
+// 功能:
+//   1. 定期发送心跳包保持连接活跃
+//   2. 监测上下文关闭事件
+//   3. 记录心跳异常事件
 func heartbeat(ctx context.Context, conn net.Conn, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	logger.Debug("启动心跳检测",
+		zap.String("remote", conn.RemoteAddr().String()),
+		zap.Duration("interval", interval))
 
 	for {
 		select {
 		case <-ticker.C:
 			if _, err := conn.Write([]byte("PING\n")); err != nil {
+				logger.Warn("心跳发送失败",
+					zap.String("remote", conn.RemoteAddr().String()),
+					zap.Error(err))
 				return
 			}
+			logger.Debug("心跳包已发送",
+				zap.String("remote", conn.RemoteAddr().String()))
+
 		case <-ctx.Done():
+			logger.Debug("上下文关闭，终止心跳检测",
+				zap.String("remote", conn.RemoteAddr().String()))
 			return
 		}
 	}
@@ -98,6 +119,14 @@ func createTunnel(ctx context.Context, ctrlConn net.Conn, localPort int) error {
 }
 
 // 新增数据转发函数
+// forward 双向流量转发核心逻辑
+// 参数:
+//   src - 源端连接
+//   dst - 目标端连接
+// 功能:
+//   1. 建立带超时控制的转发通道
+//   2. 实时统计传输字节数
+//   3. 监控连接中断事件
 func forward(src, dst net.Conn) {
 	defer src.Close()
 	defer dst.Close()
@@ -105,24 +134,35 @@ func forward(src, dst net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	logger.Info("启动流量转发通道",
+		zap.String("src", src.RemoteAddr().String()),
+		zap.String("dst", dst.RemoteAddr().String()))
+
 	for {
 		select {
 		case <-ctx.Done():
+			logger.Debug("上下文关闭，终止转发循环")
 			return
 		default:
 			dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			startTime := time.Now()
 			written, err := io.Copy(dst, src)
+			
 			if err != nil {
 				logger.Warn("流量转发中断",
 					zap.Error(err),
-					zap.String("direction", fmt.Sprintf("%s -> %s",
-						src.RemoteAddr().String(), dst.RemoteAddr().String())))
+					zap.String("direction", fmt.Sprintf("%s -> %s", 
+						src.RemoteAddr().String(), dst.RemoteAddr().String())),
+					zap.Duration("duration", time.Since(startTime)))
 				return
 			}
-			logger.Debug("流量转发中继",
+			
+			logger.Debug("流量中继完成",
 				zap.Int64("bytes", written),
 				zap.String("from", src.RemoteAddr().String()),
-				zap.String("to", dst.RemoteAddr().String()))
+				zap.String("to", dst.RemoteAddr().String()),
+				zap.Duration("duration", time.Since(startTime)),
+				zap.Time("start_time", startTime))
 		}
 	}
 }
