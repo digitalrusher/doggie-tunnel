@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
@@ -12,6 +13,9 @@ var rootCmd = &cobra.Command{
 	Short: "TCP隧道内网穿透系统",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		logger, _ = zap.NewProduction()
+		viper.AddConfigPath(".")
+		viper.SetConfigFile("tunnel.yaml")
+		viper.ReadInConfig()
 	},
 }
 

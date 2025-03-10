@@ -1,10 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -25,119 +25,213 @@ var clientCmd = &cobra.Command{
 			zap.Int("local_port", localPort),
 			zap.Int("remote_port", remotePort))
 
-		// 新增连接逻辑
-		var retries int
-		maxRetries := 5
-		backoff := time.Second
-
 		for {
 			conn, err := net.Dial("tcp", serverAddr)
 			if err != nil {
 				logger.Error("连接服务端失败", zap.Error(err))
-				if retries >= maxRetries {
-					logger.Fatal("超过最大重试次数")
-				}
-
-				time.Sleep(backoff)
-				backoff *= 2
-				retries++
+				time.Sleep(5 * time.Second)
 				continue
 			}
 
 			logger.Info("成功连接服务端")
-			go heartbeat(conn, 10*time.Second)
-			go createTunnel(conn, localPort)
-			break
+			ctx, cancel := context.WithCancel(context.Background())
+
+			// 心跳维护
+			go heartbeat(ctx, conn, 10*time.Second)
+
+			// 隧道建立
+			go func() {
+				defer cancel()
+				if err := createTunnel(ctx, conn, localPort); err != nil {
+					logger.Error("隧道建立失败", zap.Error(err))
+				}
+			}()
+
+			// 连接监控
+			select {
+			case <-ctx.Done():
+				conn.Close()
+				logger.Info("连接生命周期结束，启动重连")
+			}
 		}
 	},
 }
 
 // 新增心跳检测函数
-func heartbeat(conn net.Conn, interval time.Duration) {
+func heartbeat(ctx context.Context, conn net.Conn, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			_, err := conn.Write([]byte("PING\n"))
-			if err != nil {
-				logger.Error("心跳发送失败", zap.Error(err))
-				conn.Close()
+			if _, err := conn.Write([]byte("PING\n")); err != nil {
 				return
 			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
 // 新增隧道创建函数
-func createTunnel(ctrlConn net.Conn, localPort int) {
+func createTunnel(ctx context.Context, ctrlConn net.Conn, localPort int) error {
 	defer ctrlConn.Close()
 
-	// 读取服务端分配的端口
 	buf := make([]byte, 1024)
 	n, err := ctrlConn.Read(buf)
 	if err != nil {
-		logger.Error("读取服务端响应失败", zap.Error(err))
-		return
+		return fmt.Errorf("读取服务端响应失败: %w", err)
 	}
 
-	resp := string(buf[:n])
 	var remotePort int
-	_, err = fmt.Sscanf(resp, "PORT:%d", &remotePort)
-	if err != nil {
-		logger.Error("解析端口失败", zap.Error(err))
-		return
+	if _, err := fmt.Sscanf(string(buf[:n]), "PORT:%d", &remotePort); err != nil {
+		return fmt.Errorf("解析端口失败: %w", err)
 	}
 
-	logger.Info("隧道建立成功",
-		zap.Int("local_port", localPort),
-		zap.Int("remote_port", remotePort))
+	logger.Info("隧道端口已分配",
+		zap.Int("local", localPort),
+		zap.Int("remote", remotePort))
 
-	// 启动本地端口监听
-	localListener, err := net.Listen("tcp", fmt.Sprintf(":%d", localPort))
-	if err != nil {
-		logger.Error("本地端口监听失败", zap.Error(err))
-		return
-	}
-	defer localListener.Close()
-
-	for {
-		localConn, err := localListener.Accept()
-		if err != nil {
-			logger.Error("接受本地连接失败", zap.Error(err))
-			continue
-		}
-
-		// 连接到服务端隧道端口
-		tunnelConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d",
-			strings.Split(ctrlConn.RemoteAddr().String(), ":")[0], remotePort))
-		if err != nil {
-			logger.Error("连接隧道端口失败", zap.Error(err))
-			localConn.Close()
-			continue
-		}
-
-		go forward(localConn, tunnelConn)
-		go forward(tunnelConn, localConn)
-	}
+	// 启动本地监听和端口转发
+	return startPortForwarding(ctx, ctrlConn, localPort, remotePort)
 }
 
 // 新增数据转发函数
 func forward(src, dst net.Conn) {
 	defer src.Close()
 	defer dst.Close()
-	io.Copy(dst, src)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			written, err := io.Copy(dst, src)
+			if err != nil {
+				logger.Warn("流量转发中断",
+					zap.Error(err),
+					zap.String("direction", fmt.Sprintf("%s -> %s",
+						src.RemoteAddr().String(), dst.RemoteAddr().String())))
+				return
+			}
+			logger.Debug("流量转发中继",
+				zap.Int64("bytes", written),
+				zap.String("from", src.RemoteAddr().String()),
+				zap.String("to", dst.RemoteAddr().String()))
+		}
+	}
+}
+
+// 新增连接重试逻辑
+func connectWithRetry(addr string, maxRetries int) (net.Conn, error) {
+	var conn net.Conn
+	var err error
+	for i := 0; i < maxRetries; i++ {
+		conn, err = net.Dial("tcp", addr)
+		if err == nil {
+			return conn, nil
+		}
+		time.Sleep(time.Second * time.Duration(i+1))
+	}
+	return nil, err
 }
 
 func init() {
 	rootCmd.AddCommand(clientCmd)
 
 	clientCmd.Flags().StringP("server", "s", "127.0.0.1:8080", "服务端地址")
-	clientCmd.Flags().IntP("local", "l", 8080, "本地服务端口")
+	clientCmd.Flags().IntP("local", "l", 80, "本地服务端口")
 	clientCmd.Flags().IntP("remote", "r", 0, "远程绑定端口（0表示自动分配）")
 
 	viper.BindPFlag("client.server_addr", clientCmd.Flags().Lookup("server"))
 	viper.BindPFlag("client.local_port", clientCmd.Flags().Lookup("local"))
 	viper.BindPFlag("client.remote_port", clientCmd.Flags().Lookup("remote"))
+}
+
+// 新增连接管理函数
+func manageConnection(serverAddr string, localPort int) {
+	for {
+		ctrlConn, err := connectWithRetry(serverAddr, 5)
+		if err != nil {
+			logger.Error("控制连接重建失败", zap.Error(err))
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go heartbeat(ctx, ctrlConn, 10*time.Second)
+		go func() {
+			defer cancel()
+			if err := createTunnel(ctx, ctrlConn, localPort); err != nil {
+				logger.Error("隧道建立失败", zap.Error(err))
+			}
+		}()
+
+		// 连接状态监控
+		connCheckTicker := time.NewTicker(5 * time.Second)
+		defer connCheckTicker.Stop()
+
+		for {
+			select {
+			case <-connCheckTicker.C:
+				if _, err := ctrlConn.Write([]byte{}); err != nil {
+					logger.Warn("控制连接异常，准备重连")
+					ctrlConn.Close()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func startPortForwarding(ctx context.Context, ctrlConn net.Conn, localPort int, remotePort int) error {
+	localAddr := fmt.Sprintf(":%d", localPort)
+	listener, err := net.Listen("tcp", localAddr)
+	if err != nil {
+		return fmt.Errorf("本地监听失败: %w", err)
+	}
+	defer listener.Close()
+
+	logger.Info("本地服务已启动", zap.Int("port", localPort))
+
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+		logger.Info("本地监听器已关闭")
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			localConn, err := listener.Accept()
+			if err != nil {
+				logger.Warn("接受本地连接失败", zap.Error(err))
+				continue
+			}
+
+			remoteConn, err := connectWithRetry(ctrlConn.RemoteAddr().String(), 3)
+			if err != nil {
+				localConn.Close()
+				logger.Error("连接远程隧道失败", zap.Error(err))
+				continue
+			}
+
+			logger.Info("建立端口转发通道",
+				zap.String("local", localConn.RemoteAddr().String()),
+				zap.String("remote", remoteConn.RemoteAddr().String()))
+
+			go forward(localConn, remoteConn)
+			go forward(remoteConn, localConn)
+		}
+	}
 }

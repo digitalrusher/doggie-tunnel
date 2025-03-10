@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -101,25 +103,49 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 隧道转发逻辑
-	forwarder := func(src, dst net.Conn) {
+	// 隧道转发逻辑（带控制连接绑定）
+	forwarder := func(ctrlConn, src, dst net.Conn) {
 		defer src.Close()
 		defer dst.Close()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				buf := make([]byte, 1024)
-				n, err := src.Read(buf)
-				if err != nil {
+	
+		// 连接绑定校验
+		if _, err := ctrlConn.Write([]byte("BIND_VERIFY")); err != nil {
+			logger.Warn("控制连接不可用", zap.Error(err))
+			return
+		}
+	
+		// 双向流量监控
+		errChan := make(chan error, 2)
+		forwardTask := func(src, dst net.Conn) {
+			for {
+				select {
+				case <-ctx.Done():
 					return
-				}
-				_, err = dst.Write(buf[:n])
-				if err != nil {
-					return
+				default:
+					dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
+					written, err := io.Copy(dst, src)
+					if err != nil {
+						errChan <- fmt.Errorf("%s->%s: %w", 
+							src.RemoteAddr().String(), dst.RemoteAddr().String(), err)
+						return
+					}
+					logger.Debug("流量转发中继",
+						zap.Int64("bytes", written),
+						zap.String("from", src.RemoteAddr().String()),
+						zap.String("to", dst.RemoteAddr().String()))
 				}
 			}
+		}
+	
+		go forwardTask(src, dst)
+		go forwardTask(dst, src)
+	
+		// 错误处理流程
+		select {
+		case err := <-errChan:
+			logger.Warn("流量转发中断", zap.Error(err))
+			ctrlConn.Close()
+		case <-ctx.Done():
 		}
 	}
 
@@ -129,7 +155,10 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 		logger.Error("隧道端口监听失败", zap.Error(err))
 		return
 	}
-	defer tunnelListener.Close()
+	defer func() {
+		tunnelListener.Close()
+		logger.Info("隧道端口监听器已关闭", zap.Int("port", port))
+	}()
 
 	conn.Write([]byte(fmt.Sprintf("PORT:%d\n", port)))
 
@@ -140,8 +169,31 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 	}
 	defer tunnelConn.Close()
 
-	go forwarder(conn, tunnelConn)
-	forwarder(tunnelConn, conn)
+	// 建立双向转发通道（绑定控制连接）
+	go forwarder(conn, conn, tunnelConn)
+	go forwarder(conn, tunnelConn, conn)
+
+	// 连接关闭后回收端口
+	cancel()
+	defer func() {
+		// 等待所有连接完全关闭
+		<-time.After(30*time.Second)
+		// 增强型端口回收（立即回收+延迟校验）
+		defer func() {
+			portPool.mu.Lock()
+			portPool.ports[port] = true
+			portPool.mu.Unlock()
+		
+			go func(p int) {
+				time.Sleep(35 * time.Second)
+				if _, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", p), 2*time.Second); err == nil {
+					logger.Warn("端口仍被占用", zap.Int("port", p))
+				}
+			}(port)
+		
+			logger.Info("端口已回收", zap.Int("port", port))
+		}()
+	}()
 }
 
 func init() {

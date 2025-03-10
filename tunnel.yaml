@@ -1,0 +1,9 @@
+server:
+  port: 8080
+  start_port: 10000
+  end_port: 20000
+
+client:
+  server_addr: 127.0.0.1:8080
+  local_port: 80
+  remote_port: 0
