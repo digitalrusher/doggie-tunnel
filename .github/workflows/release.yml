@@ -39,7 +39,7 @@ jobs:
           pwd  # 调试路径
           ls -al  # 查看目录结构
           mkdir -p ./cmd/
-          go build  ./cmd/root.go -o doggie-tunnel-${GOOS}_${GOARCH} 
+          go build  -o doggie-tunnel-${GOOS}_${GOARCH}  ./cmd/root.go 
           mkdir release
           mv doggie-tunnel* release/
 
