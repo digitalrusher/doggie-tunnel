@@ -36,6 +36,9 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           cd ${{ github.workspace }}
+          pwd  # 调试路径
+          ls -al  # 查看目录结构
+          mkdir -p ./cmd/
           go build -o doggie-tunnel-client_${GOOS}_${GOARCH} ./cmd/client
           mkdir release
           mv doggie-tunnel-client* release/
@@ -59,6 +62,9 @@ jobs:
       - name: Build Server
         run: |
           cd ${{ github.workspace }}
+          pwd  # 调试路径
+          ls -al  # 查看目录结构
+          mkdir -p ./cmd/
           go build -o doggie-tunnel-server_linux_amd64 ./cmd/server
           mkdir release
           mv doggie-tunnel-server* release/
