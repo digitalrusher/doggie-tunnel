@@ -6,8 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  build-client:
-    name: Build Client
+  build:
+    name: Build 
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -39,44 +39,19 @@ jobs:
           pwd  # 调试路径
           ls -al  # 查看目录结构
           mkdir -p ./cmd/
-          go build  ./cmd/client.go -o doggie-tunnel-client_${GOOS}_${GOARCH} 
+          go build  ./cmd/root.go -o doggie-tunnel-${GOOS}_${GOARCH} 
           mkdir release
-          mv doggie-tunnel-client* release/
+          mv doggie-tunnel* release/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: client-binaries
+          name: release-binaries
           path: release/
 
-  build-server:
-    name: Build Server
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-
-      - name: Build Server
-        run: |
-          cd ${{ github.workspace }}
-          pwd  # 调试路径
-          ls -al  # 查看目录结构
-          mkdir -p ./cmd/
-          go build ./cmd/server.go -o doggie-tunnel-server_linux_amd64 
-          mkdir release
-          mv doggie-tunnel-server* release/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-binary
-          path: release/
 
   release:
     name: Create Release
-    needs: [build-client, build-server]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # 新增权限声明
@@ -92,5 +67,4 @@ jobs:
           tag_name: ${{ github.ref }}
           name: ${{ github.ref_name }}
           files: |
-            artifacts/client-binaries/*
-            artifacts/server-binary/*
+            artifacts/release-binaries/*
