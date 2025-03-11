@@ -36,7 +36,6 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           cd ${{ github.workspace }}
-          mkdir -p ./cmd/
           go build  -o doggie-tunnel-${GOOS}_${GOARCH}  ./cmd/root.go 
           mkdir release
           mv doggie-tunnel* release/
