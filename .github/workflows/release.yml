@@ -35,6 +35,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
         run: |
+          cd ${{ github.workspace }}
           go build -o doggie-tunnel-client_${GOOS}_${GOARCH} ./cmd/client
           mkdir release
           mv doggie-tunnel-client* release/
@@ -57,6 +58,7 @@ jobs:
 
       - name: Build Server
         run: |
+          cd ${{ github.workspace }}
           go build -o doggie-tunnel-server_linux_amd64 ./cmd/server
           mkdir release
           mv doggie-tunnel-server* release/
@@ -70,6 +72,8 @@ jobs:
     name: Create Release
     needs: [build-client, build-server]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 新增权限声明
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
