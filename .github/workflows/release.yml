@@ -39,7 +39,7 @@ jobs:
           mkdir release
           mv doggie-tunnel-client* release/
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: client-binaries
           path: release/
@@ -61,7 +61,7 @@ jobs:
           mkdir release
           mv doggie-tunnel-server* release/
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: server-binary
           path: release/
