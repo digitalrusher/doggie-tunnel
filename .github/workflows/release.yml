@@ -36,8 +36,6 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           cd ${{ github.workspace }}
-          pwd  # 调试路径
-          ls -al  # 查看目录结构
           mkdir -p ./cmd/
           go build  -o doggie-tunnel-${GOOS}_${GOARCH}  ./cmd/root.go 
           mkdir release
