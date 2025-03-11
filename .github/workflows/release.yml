@@ -39,7 +39,7 @@ jobs:
           pwd  # 调试路径
           ls -al  # 查看目录结构
           mkdir -p ./cmd/
-          go build -o doggie-tunnel-client_${GOOS}_${GOARCH} ./cmd/client
+          go build  ./cmd/client.go -o doggie-tunnel-client_${GOOS}_${GOARCH} 
           mkdir release
           mv doggie-tunnel-client* release/
 
@@ -65,7 +65,7 @@ jobs:
           pwd  # 调试路径
           ls -al  # 查看目录结构
           mkdir -p ./cmd/
-          go build -o doggie-tunnel-server_linux_amd64 ./cmd/server
+          go build ./cmd/server.go -o doggie-tunnel-server_linux_amd64 
           mkdir release
           mv doggie-tunnel-server* release/
 
