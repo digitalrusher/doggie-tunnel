@@ -60,13 +60,15 @@ var clientCmd = &cobra.Command{
 // 新增心跳检测函数
 // heartbeat 连接心跳维护机制
 // 参数:
-//   ctx - 上下文控制
-//   conn - 目标连接
-//   interval - 心跳间隔时间
+//
+//	ctx - 上下文控制
+//	conn - 目标连接
+//	interval - 心跳间隔时间
+//
 // 功能:
-//   1. 定期发送心跳包保持连接活跃
-//   2. 监测上下文关闭事件
-//   3. 记录心跳异常事件
+//  1. 定期发送心跳包保持连接活跃
+//  2. 监测上下文关闭事件
+//  3. 记录心跳异常事件
 func heartbeat(ctx context.Context, conn net.Conn, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -100,15 +102,28 @@ func createTunnel(ctx context.Context, ctrlConn net.Conn, localPort int) error {
 	defer ctrlConn.Close()
 
 	buf := make([]byte, 1024)
+	ctrlConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, err := ctrlConn.Read(buf)
 	if err != nil {
 		return fmt.Errorf("读取服务端响应失败: %w", err)
 	}
 
+	// 增加最小长度校验
+	if n < 5 {
+		return fmt.Errorf("无效的端口响应长度")
+	}
+
 	var remotePort int
 	if _, err := fmt.Sscanf(string(buf[:n]), "PORT:%d", &remotePort); err != nil {
-		return fmt.Errorf("解析端口失败: %w", err)
+		logger.Error("端口解析失败",
+			zap.ByteString("received", buf[:n]),
+			zap.Error(err))
+		return fmt.Errorf("端口解析失败: %w", err)
 	}
+	ctrlConn.SetReadDeadline(time.Time{}) // 重置截止时间
+	logger.Info("成功解析隧道端口",
+		zap.Int("remote_port", remotePort),
+		zap.String("raw_data", string(buf[:n])))
 
 	logger.Info("隧道端口已分配",
 		zap.Int("local", localPort),
@@ -121,12 +136,14 @@ func createTunnel(ctx context.Context, ctrlConn net.Conn, localPort int) error {
 // 新增数据转发函数
 // forward 双向流量转发核心逻辑
 // 参数:
-//   src - 源端连接
-//   dst - 目标端连接
+//
+//	src - 源端连接
+//	dst - 目标端连接
+//
 // 功能:
-//   1. 建立带超时控制的转发通道
-//   2. 实时统计传输字节数
-//   3. 监控连接中断事件
+//  1. 建立带超时控制的转发通道
+//  2. 实时统计传输字节数
+//  3. 监控连接中断事件
 func forward(src, dst net.Conn) {
 	defer src.Close()
 	defer dst.Close()
@@ -147,16 +164,16 @@ func forward(src, dst net.Conn) {
 			dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			startTime := time.Now()
 			written, err := io.Copy(dst, src)
-			
+
 			if err != nil {
 				logger.Warn("流量转发中断",
 					zap.Error(err),
-					zap.String("direction", fmt.Sprintf("%s -> %s", 
+					zap.String("direction", fmt.Sprintf("%s -> %s",
 						src.RemoteAddr().String(), dst.RemoteAddr().String())),
 					zap.Duration("duration", time.Since(startTime)))
 				return
 			}
-			
+
 			logger.Debug("流量中继完成",
 				zap.Int64("bytes", written),
 				zap.String("from", src.RemoteAddr().String()),
@@ -233,45 +250,61 @@ func manageConnection(serverAddr string, localPort int) {
 }
 
 func startPortForwarding(ctx context.Context, ctrlConn net.Conn, localPort int, remotePort int) error {
-	localAddr := fmt.Sprintf(":%d", localPort)
-	listener, err := net.Listen("tcp", localAddr)
+	// 添加端口绑定验证
+	localAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
+	remoteAddr := fmt.Sprintf("127.0.0.1:%d", remotePort)
+
+	// 创建本地监听
+	localListener, err := net.Listen("tcp", localAddr)
 	if err != nil {
-		return fmt.Errorf("本地监听失败: %w", err)
+		logger.Error("本地服务监听失败",
+			zap.String("address", localAddr),
+			zap.Error(err))
+		return err
 	}
-	defer listener.Close()
 
-	logger.Info("本地服务已启动", zap.Int("port", localPort))
-
+	// 健康检查协程
 	go func() {
-		<-ctx.Done()
-		listener.Close()
-		logger.Info("本地监听器已关闭")
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// 验证隧道连接状态
+				if _, err := ctrlConn.Write([]byte("HEALTH_CHECK")); err != nil {
+					logger.Warn("健康检查失败，准备重连",
+						zap.Error(err))
+					return
+				}
+				logger.Debug("健康检查成功")
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 
+	// 端口转发主循环
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-			localConn, err := listener.Accept()
-			if err != nil {
-				logger.Warn("接受本地连接失败", zap.Error(err))
-				continue
-			}
-
-			remoteConn, err := connectWithRetry(ctrlConn.RemoteAddr().String(), 3)
-			if err != nil {
-				localConn.Close()
-				logger.Error("连接远程隧道失败", zap.Error(err))
-				continue
-			}
-
-			logger.Info("建立端口转发通道",
-				zap.String("local", localConn.RemoteAddr().String()),
-				zap.String("remote", remoteConn.RemoteAddr().String()))
-
-			go forward(localConn, remoteConn)
-			go forward(remoteConn, localConn)
+		localConn, err := localListener.Accept()
+		if err != nil {
+			logger.Error("接受本地连接失败",
+				zap.Error(err))
+			continue
 		}
+
+		// 建立远程隧道连接
+		remoteConn, err := net.Dial("tcp", remoteAddr)
+		if err != nil {
+			logger.Error("连接远程隧道失败",
+				zap.String("address", remoteAddr),
+				zap.Error(err))
+			localConn.Close()
+			continue
+		}
+
+		// 启动双向转发
+		go forward(localConn, remoteConn)
+		go forward(remoteConn, localConn)
 	}
 }

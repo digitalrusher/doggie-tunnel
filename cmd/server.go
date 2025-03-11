@@ -116,13 +116,13 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 	forwarder := func(ctrlConn, src, dst net.Conn) {
 		defer src.Close()
 		defer dst.Close()
-	
+
 		// 连接绑定校验
 		if _, err := ctrlConn.Write([]byte("BIND_VERIFY")); err != nil {
 			logger.Warn("控制连接不可用", zap.Error(err))
 			return
 		}
-	
+
 		// 双向流量监控
 		errChan := make(chan error, 2)
 		forwardTask := func(src, dst net.Conn) {
@@ -134,7 +134,7 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 					dst.SetWriteDeadline(time.Now().Add(30 * time.Second))
 					written, err := io.Copy(dst, src)
 					if err != nil {
-						errChan <- fmt.Errorf("%s->%s: %w", 
+						errChan <- fmt.Errorf("%s->%s: %w",
 							src.RemoteAddr().String(), dst.RemoteAddr().String(), err)
 						return
 					}
@@ -145,10 +145,10 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 				}
 			}
 		}
-	
+
 		go forwardTask(src, dst)
 		go forwardTask(dst, src)
-	
+
 		// 错误处理流程
 		select {
 		case err := <-errChan:
@@ -168,8 +168,11 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 		tunnelListener.Close()
 		logger.Info("隧道端口监听器已关闭", zap.Int("port", port))
 	}()
-
+	logger.Info("隧道端口已尝试启动监听", zap.Int("port", port))
 	conn.Write([]byte(fmt.Sprintf("PORT:%d\n", port)))
+	logger.Info("隧道端口写入client",
+		zap.Int("port", port),
+		zap.String("protocol", "控制信道"))
 
 	tunnelConn, err := tunnelListener.Accept()
 	if err != nil {
@@ -179,27 +182,34 @@ func handleClient(conn net.Conn, portPool *PortPool) {
 	defer tunnelConn.Close()
 
 	// 建立双向转发通道（绑定控制连接）
-	go forwarder(conn, conn, tunnelConn)
-	go forwarder(conn, tunnelConn, conn)
+	// 等待隧道连接就绪后再启动转发
+	select {
+	case <-time.After(30 * time.Second):
+		logger.Warn("隧道连接建立超时")
+		return
+	default:
+		go forwarder(conn, conn, tunnelConn)
+		go forwarder(conn, tunnelConn, conn)
+	}
 
 	// 连接关闭后回收端口
 	cancel()
 	defer func() {
 		// 等待所有连接完全关闭
-		<-time.After(30*time.Second)
+		<-time.After(30 * time.Second)
 		// 增强型端口回收（立即回收+延迟校验）
 		defer func() {
 			portPool.mu.Lock()
 			portPool.ports[port] = true
 			portPool.mu.Unlock()
-		
+
 			go func(p int) {
 				time.Sleep(35 * time.Second)
 				if _, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", p), 2*time.Second); err == nil {
 					logger.Warn("端口仍被占用", zap.Int("port", p))
 				}
 			}(port)
-		
+
 			logger.Info("端口已回收", zap.Int("port", port))
 		}()
 	}()
