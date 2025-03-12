@@ -66,3 +66,4 @@ jobs:
           files: |
             artifacts/release-binaries/*
             release/**
+            artifacts/*
